@@ -76,6 +76,23 @@ class NemoStreamEngine:
         log.info("Model ready on %s, sample_rate=%d, amp=%s(%s)",
                  self.device, self.sample_rate, self.amp, cfg.amp_dtype)
 
+    def configure(self, target_lang: str | None = None, strip_lang_tags: bool | None = None) -> None:
+        """Re-apply the inference language prompt and/or lang-tag stripping at runtime.
+
+        Cheap and idempotent, but mutates GLOBAL model state — fine for sequential single-user
+        use; NOT safe to change mid-stream under concurrency (one stream's chunks would shift language).
+        """
+        if target_lang is not None and hasattr(self.model, "set_inference_prompt"):
+            self.model.set_inference_prompt(target_lang)
+            log.info("target_lang=%s", target_lang)
+        if (
+            strip_lang_tags is not None
+            and hasattr(self.model, "decoding")
+            and hasattr(self.model.decoding, "set_strip_lang_tags")
+        ):
+            self.model.decoding.set_strip_lang_tags(strip_lang_tags, lang_tag_pattern=None)
+            log.info("strip_lang_tags=%s", strip_lang_tags)
+
     @property
     def chunk_samples(self) -> int:
         ms = N_TO_MS.get(self.cfg.att_context_n, 320)

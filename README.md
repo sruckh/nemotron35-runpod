@@ -14,9 +14,13 @@ built on NeMo's cache-aware streaming. The slim image is built in CI and pushed 
 - **Cache-aware streaming.** Audio is fed to NeMo's `CacheAwareStreamingAudioBuffer` and decoded
   chunk-by-chunk via `model.conformer_stream_step(...)`, threading encoder caches + RNNT hypotheses.
   Only new mic audio is processed per step — no redundant recompute.
-- **Gradio UI + public link.** `gr.Audio(streaming=True)` mic input → streaming `Textbox` output.
-  `SHARE_LINK=true` prints a temporary `https://<id>.gradio.live` URL to the pod logs, bypassing
-  the (unreliable) RunPod proxy.
+- **Gradio UI + public link.** Two tabs: **Upload** (upload a wav/mp3, pick language + strip-tag,
+  transcribe the whole file) and **Microphone** (live browser-mic streaming). A language dropdown
+  (`auto` + 40 locales) re-applies the prompt per transcription. `SHARE_LINK=true` prints a temporary
+  `https://<id>.gradio.live` URL to the pod logs, bypassing the (unreliable) RunPod proxy.
+- **ASR only — no translation.** This model transcribes speech → text **in the same language**. It does
+  not translate between languages (`auto` detects & tags the spoken language, it does not convert it).
+  For translation, use a different model (e.g. NVIDIA Canary-1B, SeamlessM4T) or chain ASR → MT.
 
 ```
 mic chunk -> prepare (->16k mono f32) -> StreamSession.feed() -> CacheAwareStreamingAudioBuffer

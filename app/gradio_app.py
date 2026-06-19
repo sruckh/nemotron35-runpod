@@ -1,14 +1,13 @@
-"""Gradio web UI: real-time microphone streaming -> partial/final transcript.
+"""Gradio web UI for Nemotron 3.5 ASR.
 
-Design:
-  * Each recording owns a server-side StreamSession (kept in _SESSIONS, keyed by an id stored in
-    gr.State). We store only the id in Gradio state so nothing GPU-heavy is serialized by the queue.
-  * audio.stream() fires on each mic chunk -> feed ONLY the new chunk to the cache-aware session
-    (not the whole history) -> streaming partial transcript.
-  * audio.stop_recording() flushes the session (silence-pad drain) -> final transcript, then frees it.
+Two tabs:
+  * Upload   — upload an audio file (wav/mp3/...), pick language + strip-tag option, transcribe.
+               This is the robust path on a headless server (no local mic needed).
+  * Microphone — live streaming from the browser's mic (works via the public link on a
+               device that has a microphone).
 
-Public link: SHARE_LINK=1 -> Gradio prints a temporary https://<id>.gradio.live URL to the logs
-(capture it from pod logs; it bypasses the unreliable RunPod proxy).
+Note: Nemotron 3.5 ASR is ASR-only (speech -> text in the SAME language). It does NOT translate
+between languages. `auto` = auto-detect the spoken language and label it.
 """
 
 from __future__ import annotations
@@ -27,28 +26,59 @@ from app.nemo_stream import NemoStreamEngine
 
 log = setup_logging("nemotron35")
 
-# --- model is loaded once at process start (chunk size + lang are process-global) ---
+# Model is loaded once at process start. Chunk size is process-global (env); language is
+# re-applied per transcription via ENGINE.configure() below.
 CFG = cfg_mod.load()
 ENGINE = NemoStreamEngine(CFG)
 
-# server-side sessions; id-only in Gradio state. Cleaned up on stop. (v1: in-memory, per-pod)
+# auto + the 40 model-card locales (transcription-ready / broad-coverage / adaptation-ready).
+LANGUAGES = [
+    "auto",
+    "en-US", "en-GB", "es-US", "es-ES", "fr-FR", "fr-CA", "it-IT", "pt-BR", "pt-PT",
+    "nl-NL", "de-DE", "tr-TR", "ru-RU", "ar-AR", "hi-IN", "ja-JP", "ko-KR", "vi-VN", "uk-UA",
+    "pl-PL", "sv-SE", "cs-CZ", "nb-NO", "da-DK", "bg-BG", "fi-FI", "hr-HR", "sk-SK",
+    "zh-CN", "hu-HU", "ro-RO", "et-EE",
+    "el-GR", "lt-LT", "lv-LV", "mt-MT", "sl-SI", "he-IL", "th-TH", "nn-NO",
+]
+
+# Server-side mic sessions keyed by an id stored in gr.State (nothing GPU-heavy serialized by the queue).
 _SESSIONS: dict[str, "StreamSession"] = {}  # noqa: F821
 STREAM_EVERY_S = float(os.environ.get("STREAM_EVERY_S", "0.5"))
 STREAM_TIME_LIMIT_S = int(os.environ.get("STREAM_TIME_LIMIT_S", "600"))
 
 
+# --------------------------------------------------------------------------- upload (full-file)
+def upload_transcribe(audio, language, strip_tags):
+    if audio is None:
+        return "", "No audio uploaded."
+    try:
+        sr, y = audio
+        if y is None or getattr(y, "size", 0) == 0:
+            return "", "Uploaded audio is empty."
+        ENGINE.configure(target_lang=language, strip_lang_tags=bool(strip_tags))
+        pcm = prepare(y, sr, ENGINE.sample_rate)
+        seconds = len(pcm) / ENGINE.sample_rate
+        log.info("upload transcribe: %.1fs @ %dHz -> 16k mono, lang=%s", seconds, sr, language)
+        text = ENGINE.transcribe_pcm(pcm).strip()
+        info = f"transcribed {seconds:.1f}s · language={language} · strip_lang_tags={strip_tags}"
+        return text or "(no speech detected)", info
+    except Exception as e:  # pragma: no cover
+        log.exception("upload_transcribe failed")
+        return "", f"error: {e}"
+
+
+# --------------------------------------------------------------------------- microphone (live)
 def _get_or_create(session_id):
     if session_id and session_id in _SESSIONS:
         return session_id, _SESSIONS[session_id]
     sid = uuid.uuid4().hex
     sess = ENGINE.new_session()
     _SESSIONS[sid] = sess
-    log.info("new session %s (active=%d)", sid, len(_SESSIONS))
+    log.info("new mic session %s (active=%d)", sid, len(_SESSIONS))
     return sid, sess
 
 
 def on_chunk(session_id, chunk):
-    """chunk == (sample_rate, np.ndarray) from the mic; None/empty before first audio."""
     if not session_id and (chunk is None):
         return session_id, ""
     sid, sess = _get_or_create(session_id)
@@ -57,9 +87,8 @@ def on_chunk(session_id, chunk):
         if y is None or getattr(y, "size", 0) == 0:
             return sid, sess.text
         pcm = prepare(y, sr, ENGINE.sample_rate)
-        text = sess.feed(pcm)
-        return sid, text
-    except Exception as e:  # keep the stream alive; surface in transcript
+        return sid, sess.feed(pcm)
+    except Exception as e:
         log.exception("on_chunk failed")
         return sid, (sess.text + f"\n[error: {e}]")
 
@@ -67,39 +96,46 @@ def on_chunk(session_id, chunk):
 def on_stop(session_id):
     sess = _SESSIONS.pop(session_id, None)
     text = sess.finish() if sess is not None else ""
-    log.info("session %s finalized (active=%d)", session_id, len(_SESSIONS))
-    # clear the Gradio-side id so the next recording starts fresh
+    log.info("mic session %s finalized (active=%d)", session_id, len(_SESSIONS))
     return text, None
 
 
 def build_demo() -> gr.Blocks:
-    chunk_ms = CFG.chunk_ms
     with gr.Blocks(title="Nemotron 3.5 ASR") as demo:
         gr.Markdown(
-            f"# Nemotron 3.5 ASR — streaming\n"
-            f"Model `{CFG.model_name}` · chunk `{chunk_ms} ms` · target_lang `{CFG.target_lang}` · "
-            f"strip_lang_tags `{CFG.strip_lang_tags}`"
+            f"# Nemotron 3.5 ASR\n"
+            f"Multilingual speech-to-text (`{CFG.model_name}`). **Transcription only** — it does not "
+            f"translate between languages. `auto` detects the spoken language.\n\n"
+            f"Active chunk: {CFG.chunk_ms} ms."
         )
-        with gr.Row():
-            audio = gr.Audio(
-                sources=["microphone"],
-                type="numpy",
-                streaming=True,
-                label="Speak — transcript streams as you talk",
-            )
-        transcript = gr.Textbox(label="Transcript", lines=8, placeholder="…")
-        session_id = gr.State(value=None)
-        clear = gr.Button("Clear")
+        with gr.Tab("Upload audio file"):
+            gr.Markdown("Upload a wav/mp3/etc. Choose a language (or `auto` to detect) and transcribe.")
+            with gr.Row():
+                up_audio = gr.Audio(sources=["upload"], type="numpy", label="Audio file")
+            with gr.Row():
+                up_lang = gr.Dropdown(LANGUAGES, value="auto", label="Language", scale=2)
+                up_strip = gr.Checkbox(value=True, label="Strip language tag from output", scale=2)
+                up_btn = gr.Button("Transcribe", variant="primary", scale=1)
+            up_text = gr.Textbox(label="Transcript", lines=10)
+            up_info = gr.Markdown("")
+            up_btn.click(upload_transcribe, [up_audio, up_lang, up_strip], [up_text, up_info])
 
-        audio.stream(
-            on_chunk,
-            inputs=[session_id, audio],
-            outputs=[session_id, transcript],
-            stream_every=STREAM_EVERY_S,
-            time_limit=STREAM_TIME_LIMIT_S,
-        )
-        audio.stop_recording(on_stop, inputs=[session_id], outputs=[transcript, session_id])
-        clear.click(lambda: ("", None), outputs=[transcript, session_id])
+        with gr.Tab("Microphone (live)"):
+            gr.Markdown(
+                "Streams from your browser's microphone (works via the public link on a device with a "
+                "mic). Uses the startup language (`TARGET_LANG`) for live mode."
+            )
+            mic_audio = gr.Audio(sources=["microphone"], type="numpy", streaming=True,
+                                 label="Speak — transcript streams as you talk")
+            mic_text = gr.Textbox(label="Transcript", lines=8, placeholder="…")
+            session_id = gr.State(value=None)
+            clear = gr.Button("Clear")
+            mic_audio.stream(
+                on_chunk, [session_id, mic_audio], [session_id, mic_text],
+                stream_every=STREAM_EVERY_S, time_limit=STREAM_TIME_LIMIT_S,
+            )
+            mic_audio.stop_recording(on_stop, [session_id], [mic_text, session_id])
+            clear.click(lambda: ("", None), outputs=[mic_text, session_id])
     return demo
 
 
