@@ -48,10 +48,16 @@ else
   log "nemo already present"
 fi
 
-# 5. prefetch model (idempotent) — avoids first-request latency; non-fatal if it fails
+# 5. prefetch model — ONLY when not already in the HF cache. The server loads the model itself
+#    at startup, so skipping a cached prefetch avoids a redundant second model load on every boot.
 if [ "${PREFETCH_MODEL:-1}" = "1" ]; then
-  log "prefetching model (first run may take several minutes)"
-  python - <<'PY' || log "model prefetch failed; will lazy-load on first request"
+  MODEL_NAME="${MODEL_NAME:-nvidia/nemotron-3.5-asr-streaming-0.6b}"
+  CACHE_DIR="$HF_HOME/hub/models--${MODEL_NAME//\//--}"
+  if [ -n "$(ls -A "$CACHE_DIR/snapshots" 2>/dev/null)" ]; then
+    log "model already cached at $CACHE_DIR; skipping prefetch"
+  else
+    log "prefetching model (first run may take several minutes)"
+    python - <<'PY' || log "model prefetch failed; will lazy-load on first request"
 import os
 import nemo.collections.asr as nemo_asr
 name = os.environ.get("MODEL_NAME", "nvidia/nemotron-3.5-asr-streaming-0.6b")
@@ -59,6 +65,7 @@ m = nemo_asr.models.ASRModel.from_pretrained(name)
 print(f"[entrypoint] prefetched {name} -> {os.environ.get('HF_HOME')}")
 del m
 PY
+  fi
 fi
 
 log "bootstrap complete; starting: $*"
