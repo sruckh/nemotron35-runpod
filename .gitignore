@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Env / secrets
+.env
+
+# Local agent & tool state (not part of the app image)
+.claude/
+.serena/
+
+# Local caches / runtime data
+/workspace/
+*.log

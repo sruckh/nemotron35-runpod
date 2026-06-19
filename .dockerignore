@@ -1,0 +1,17 @@
+# Exclude non-runtime files from the build context to keep the image lean.
+.git
+.gitignore
+.github
+.serena
+.claude
+plans
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+README.md
+*.md
+.env
+.env.*
+Dockerfile
+.dockerignore

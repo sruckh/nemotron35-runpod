@@ -1,0 +1,5 @@
+# Light server deps only — baked into the image.
+# Heavy deps (torch 2.9.1 cu128, nemo_toolkit[asr]) are installed at RUNTIME by entrypoint.sh.
+gradio>=4.44,<7
+numpy>=1.26
+soundfile>=0.12
