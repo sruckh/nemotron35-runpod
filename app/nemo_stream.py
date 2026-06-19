@@ -176,23 +176,29 @@ class StreamSession:
         return out
 
     def feed(self, pcm: np.ndarray) -> str:
-        """Feed raw 16 kHz mono float32 PCM; append incremental transcript; return full text so far."""
+        """Feed raw 16 kHz mono float32 PCM; return the full running transcript so far.
+
+        conformer_stream_step returns the CUMULATIVE hypothesis text each step (the RNNT decoder
+        carries previous_hypotheses forward), so each drained chunk already holds the full running
+        transcript. We therefore REPLACE self.text with the latest non-empty chunk's text — never
+        append (appending would duplicate the growing transcript at every step).
+        """
         if pcm is None:
             return self.text
         pcm = np.asarray(pcm, dtype=np.float32)
         if pcm.size == 0:
             return self.text
         self.buf.append_audio(np.ascontiguousarray(pcm), stream_id=-1)
-        for t in self._drain():
-            if t:
-                self.text += t
+        drained = [t for t in self._drain() if t]
+        if drained:
+            self.text = drained[-1]
         return self.text
 
     def finish(self) -> str:
         """End of stream: pad silence so the tail fully drains (keep_all_outputs on the last chunk)."""
         pad = np.zeros(self.engine.silence_pad_samples(), dtype=np.float32)
         self.buf.append_audio(pad, stream_id=-1)
-        for t in self._drain():
-            if t:
-                self.text += t
+        drained = [t for t in self._drain() if t]
+        if drained:
+            self.text = drained[-1]
         return self.text
