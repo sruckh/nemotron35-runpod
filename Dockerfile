@@ -29,8 +29,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Light server deps only (gradio + numpy + soundfile). torch/nemo install at runtime.
+# NOTE: do NOT `--upgrade pip` here — the debian-managed pip has no RECORD file and refuses
+# self-uninstall. The shipped pip (24.0) is recent enough for these wheels.
 COPY requirements.txt ./
-RUN python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+RUN python -m pip install -r requirements.txt
 
 COPY entrypoint.sh ./
 COPY app ./app

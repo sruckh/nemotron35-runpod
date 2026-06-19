@@ -23,9 +23,10 @@ else
   log "ffmpeg + libsndfile already present"
 fi
 
-# 2. build deps (idempotent)
+# 2. build deps (idempotent). Do NOT `--upgrade pip`: debian's pip has no RECORD file and
+#    refuses self-uninstall ("Cannot uninstall pip ... installed by debian").
 log "ensuring Cython + packaging"
-python -m pip install -q --upgrade pip "Cython>=3.0" "packaging"
+python -m pip install -q "Cython>=3.0" "packaging"
 
 # 3. torch (pinned, cu128) — idempotent
 if ! python -c "import torch" 2>/dev/null; then
