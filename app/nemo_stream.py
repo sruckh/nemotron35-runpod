@@ -138,15 +138,19 @@ class StreamSession:
     def _append(self, pcm: np.ndarray) -> None:
         """Append PCM to ONE stream.
 
-        CacheAwareStreamingAudioBuffer treats stream_id < 0 (e.g. the -1 default) as 'create a NEW
-        stream' whenever the buffer already exists — it pads the batch dim by 1 each call. Calling
-        append_audio(stream_id=-1) on every mic chunk therefore grows the batch (1,2,3,…,17), while the
-        encoder cache stays batch=1 -> attention cache concat crashes ("Expected size 1 but got size N").
-        Resolve the id on the first append (buffer is None -> must use <0) and reuse it thereafter.
+        CacheAwareStreamingAudioBuffer treats stream_id < 0 (the -1 default) as 'create a NEW stream'
+        whenever the buffer already exists — it pads the batch dim +1 each call. Calling
+        append_audio(stream_id=-1) on every mic chunk therefore grows the batch (1,2,…,N) while the
+        encoder cache stays batch=1 -> attention `torch.cat([cache,key])` crashes
+        ("Expected size 1 but got size N").
+
+        So: the FIRST append (buffer is None) MUST use stream_id<0, which creates stream 0 — but note
+        append_processed_signal does NOT resolve -1 to the new index, it returns -1 unchanged. Derive
+        the real index from streams_length (= 0) and reuse it on every later append.
         """
         if self._stream_id is None:
-            _, _, sid = self.buf.append_audio(pcm, stream_id=-1)
-            self._stream_id = int(sid)
+            self.buf.append_audio(pcm, stream_id=-1)
+            self._stream_id = int(len(self.buf.streams_length)) - 1  # first stream is always index 0
         else:
             self.buf.append_audio(pcm, stream_id=self._stream_id)
 
