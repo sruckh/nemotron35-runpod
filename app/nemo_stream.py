@@ -133,6 +133,22 @@ class StreamSession:
         self.pred_out_stream = None
         self.step = 0
         self.text = ""
+        self._stream_id = None  # resolved on first append; reused so we never spawn extra streams
+
+    def _append(self, pcm: np.ndarray) -> None:
+        """Append PCM to ONE stream.
+
+        CacheAwareStreamingAudioBuffer treats stream_id < 0 (e.g. the -1 default) as 'create a NEW
+        stream' whenever the buffer already exists — it pads the batch dim by 1 each call. Calling
+        append_audio(stream_id=-1) on every mic chunk therefore grows the batch (1,2,3,…,17), while the
+        encoder cache stays batch=1 -> attention cache concat crashes ("Expected size 1 but got size N").
+        Resolve the id on the first append (buffer is None -> must use <0) and reuse it thereafter.
+        """
+        if self._stream_id is None:
+            _, _, sid = self.buf.append_audio(pcm, stream_id=-1)
+            self._stream_id = int(sid)
+        else:
+            self.buf.append_audio(pcm, stream_id=self._stream_id)
 
     def _drop_extra(self) -> int:
         # Step 0 drops nothing; subsequent steps drop streaming_cfg.drop_extra_pre_encoded.
@@ -188,7 +204,7 @@ class StreamSession:
         pcm = np.asarray(pcm, dtype=np.float32)
         if pcm.size == 0:
             return self.text
-        self.buf.append_audio(np.ascontiguousarray(pcm), stream_id=-1)
+        self._append(np.ascontiguousarray(pcm))
         drained = [t for t in self._drain() if t]
         if drained:
             self.text = drained[-1]
@@ -197,7 +213,7 @@ class StreamSession:
     def finish(self) -> str:
         """End of stream: pad silence so the tail fully drains (keep_all_outputs on the last chunk)."""
         pad = np.zeros(self.engine.silence_pad_samples(), dtype=np.float32)
-        self.buf.append_audio(pad, stream_id=-1)
+        self._append(pad)
         drained = [t for t in self._drain() if t]
         if drained:
             self.text = drained[-1]
